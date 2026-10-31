@@ -125,7 +125,7 @@ public final class VncServer {
     private WritableImage captureImage; // reused by the robot
     private int[] windowBuf; // reused by captureScenes
     private int lastMask;
-    private final String wheelModifier = Settings.get("wheelmod", "ctrl").toLowerCase(Locale.ROOT); // ctrl | alt | meta | shift
+    private final String wheelModifier = Settings.get("wheelmod", "alt").toLowerCase(Locale.ROOT); // ctrl | alt | meta | shift
     private long lastWheelCycle;
     private boolean wheelCycled; // nanoTime has an arbitrary origin: do not compare against an unset 0
     private static final long WHEEL_CYCLE_GAP_NANOS = 250_000_000L;
@@ -402,7 +402,7 @@ public final class VncServer {
         for (int[] e : batch) onPointer(e[0], e[1], e[2]);
     }
 
-    /** Whether the modifier that turns the wheel into "switch window" (Ctrl by default) is held. */
+    /** Whether the modifier that turns the wheel into "switch window" (Alt by default) is held. */
     private boolean wheelModifierDown() {
         return switch (wheelModifier) {
             case "alt" -> alt;
