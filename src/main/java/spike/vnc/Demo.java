@@ -57,7 +57,9 @@ public class Demo extends Application {
         stage.setHeight(b.getHeight());
         stage.show();
 
-        VncServer.start(Integer.getInteger("vnc.port", 5900));
+        if (!Boolean.getBoolean("demo.noserver")) { // run-agent.sh attaches the server with the Java agent instead
+            VncServer.start(Integer.getInteger("vnc.port", 5900));
+        }
     }
 
     public static void main(String[] args) {

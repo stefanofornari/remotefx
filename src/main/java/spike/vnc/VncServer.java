@@ -120,13 +120,17 @@ public final class VncServer {
         this.password = pw != null ? pw : System.getProperty("vnc.password", "");
     }
 
-    /** Starts listening on 127.0.0.1:port. Must be called on the FX application thread. */
+    private static VncServer instance; // FX thread only
+
+    /** Starts the server (a second call returns the running one). Must be called on the FX application thread. */
     public static VncServer start(int port) throws IOException {
         if (!Platform.isFxApplicationThread()) {
             throw new IllegalStateException("VncServer.start must be called on the FX application thread");
         }
+        if (instance != null) return instance;
         VncServer s = new VncServer(port);
         s.doStart();
+        instance = s;
         return s;
     }
 

@@ -28,4 +28,23 @@
             <version>${monocle.version}</version>
         </dependency>
     </dependencies>
+
+    <build>
+        <finalName>remotefx</finalName>
+        <plugins>
+            <!-- target/remotefx.jar doubles as the Java agent: java -javaagent:target/remotefx.jar ... -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.4.1</version>
+                <configuration>
+                    <archive>
+                        <manifestEntries>
+                            <Premain-Class>spike.vnc.VncAgent</Premain-Class>
+                        </manifestEntries>
+                    </archive>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
 </project>
