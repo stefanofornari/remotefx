@@ -161,7 +161,7 @@ Monocle has no window manager, so remotefx brings a very small one, built for a 
   windows is not passed on to the application. Ctrl+Shift+Tab is also "previous tab" in a JavaFX
   `TabPane`: while two or more top-level windows exist the window manager takes it, with a single
   window it goes to the application as usual.
-  **Ctrl+mouse wheel** also switches window: scroll down for the next one, up for the previous one,
+  **Ctrl+mouse wheel** (the modifier is the `wheelmod` option: `ctrl`, `alt`, `meta` or `shift`) also switches window: scroll down for the next one, up for the previous one,
   at most four switches a second because a trackpad swipe sends many notches. Ctrl+wheel is
   normally "zoom" in an application, so the same rule applies: it is taken only while two or more
   top-level windows exist.
@@ -192,6 +192,7 @@ works without touching the `-javaagent` line.
 | `capture` | `robot`     | `robot` grabs the screen; `scene` snapshots each window instead      | `VNC_CAPTURE`     |
 | `debug`   | `false`     | Trace pointer, key, pixel-format and update events on stderr         | `VNC_DEBUG`       |
 | `wm`      | on with Monocle | `true`/`false`: the [window manager](#window-management)                  | `VNC_WM`          |
+| `wheelmod` | `ctrl`    | Modifier that turns the mouse wheel into window switching: `ctrl`, `alt`, `meta`, `shift` | `VNC_WHEELMOD` |
 | `digits`  | `)!@#$%^&*(` | Characters sent for Shift+0 ... Shift+9, for the Ctrl+Shift+digit shortcuts | `VNC_DIGITS`      |
 
 The password is **only** read from the `VNC_PASSWORD` environment variable (so it does not show

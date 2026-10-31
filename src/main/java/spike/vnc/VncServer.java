@@ -23,6 +23,7 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -123,6 +124,7 @@ public final class VncServer {
     private WritableImage captureImage; // reused by the robot
     private int[] windowBuf; // reused by captureScenes
     private int lastMask;
+    private final String wheelModifier = Settings.get("wheelmod", "ctrl").toLowerCase(Locale.ROOT); // ctrl | alt | meta | shift
     private long lastWheelCycle;
     private boolean wheelCycled; // nanoTime has an arbitrary origin: do not compare against an unset 0
     private static final long WHEEL_CYCLE_GAP_NANOS = 250_000_000L;
@@ -399,6 +401,16 @@ public final class VncServer {
         for (int[] e : batch) onPointer(e[0], e[1], e[2]);
     }
 
+    /** Whether the modifier that turns the wheel into "switch window" (Ctrl by default) is held. */
+    private boolean wheelModifierDown() {
+        return switch (wheelModifier) {
+            case "alt" -> alt;
+            case "meta" -> meta;
+            case "shift" -> shift;
+            default -> ctrl;
+        };
+    }
+
     private void onPointer(int mask, int x, int y) {
         unchangedFrames = 0;
         if (DEBUG) info("pointer " + x + "," + y + " mask=" + mask);
@@ -415,8 +427,12 @@ public final class VncServer {
         // RFB buttons 4/5 are the wheel: bit 3 = up, bit 4 = down (one notch per press)
         boolean wheelUp = (mask & 8) != 0 && (lastMask & 8) == 0;
         boolean wheelDown = (mask & 16) != 0 && (lastMask & 16) == 0;
-        if ((wheelUp || wheelDown) && ctrl && wm != null && wm.canCycle()) {
-            // Ctrl+wheel switches window (down = next, up = previous). A trackpad sends a burst of notches
+        if (DEBUG && (wheelUp || wheelDown)) {
+            info("wheel " + (wheelUp ? "up" : "down") + ": ctrl=" + ctrl + " alt=" + alt + " meta=" + meta + " shift=" + shift
+                    + ", modifier needed=" + wheelModifier + ", windows to cycle=" + (wm != null && wm.canCycle()));
+        }
+        if ((wheelUp || wheelDown) && wheelModifierDown() && wm != null && wm.canCycle()) {
+            // Modifier+wheel switches window (down = next, up = previous). A trackpad sends a burst of notches
             // per swipe, so switch at most once per gap and swallow the rest.
             long now = System.nanoTime();
             if (!wheelCycled || now - lastWheelCycle >= WHEEL_CYCLE_GAP_NANOS) {
