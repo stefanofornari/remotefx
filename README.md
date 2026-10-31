@@ -155,6 +155,16 @@ Monocle has no window manager, so remotefx brings a very small one, built for a 
 - **Tab strip.** With two or more top-level windows, a strip along the top shows one tab per window
   (its title, and a close button that sends a normal close request, so the application's close
   handlers still run). Click a tab to switch. With a single window there is no strip and no chrome.
+- **Numbered tabs and shortcuts.** Tabs are numbered `1` to `9`, then `0` for the tenth (the order of the
+  keyboard's digit row). **Ctrl+Shift+digit** switches to that tab and **Ctrl+Shift+Tab** cycles to the
+  next window. The shortcuts are only active when the window manager is on, and a key that switches
+  windows is not passed on to the application. Ctrl+Shift+Tab is also "previous tab" in a JavaFX
+  `TabPane`: while two or more top-level windows exist the window manager takes it, with a single
+  window it goes to the application as usual.
+  The viewer sends the character a key produces, not the key itself, so with Shift held the digit row
+  arrives as `!@#$%^&*(` on a US layout. That is the default; for another layout set `digits` (or
+  `VNC_DIGITS`) to the ten characters Shift+0 ... Shift+9 produce, for example Italian: `=!"£$%&/()`.
+  With debug on, a Ctrl+Shift key that is not recognised is logged, so you can see what your viewer sends.
 - **Dialogs** (owned or modal stages) keep their own size and are centred over the content area.
   A dialog that belongs to a parked window brings that window back first.
 - **Popups** (menus, combo boxes, tooltips) are not touched.
@@ -178,6 +188,7 @@ works without touching the `-javaagent` line.
 | `capture` | `robot`     | `robot` grabs the screen; `scene` snapshots each window instead      | `VNC_CAPTURE`     |
 | `debug`   | `false`     | Trace pointer, key, pixel-format and update events on stderr         | `VNC_DEBUG`       |
 | `wm`      | on with Monocle | `true`/`false`: the [window manager](#window-management)                  | `VNC_WM`          |
+| `digits`  | `)!@#$%^&*(` | Characters sent for Shift+0 ... Shift+9, for the Ctrl+Shift+digit shortcuts | `VNC_DIGITS`      |
 
 The password is **only** read from the `VNC_PASSWORD` environment variable (so it does not show
 up in the process list). There is a `-Dvnc.password` fallback, but it is visible in `ps`.

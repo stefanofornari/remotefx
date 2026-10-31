@@ -82,6 +82,54 @@ final class WindowManager {
         return w == strip;
     }
 
+    // ------------------------------------------------------------------ keyboard shortcuts
+
+    private static final int NONE = -1;
+    private static final int CYCLE = -2;
+
+    /**
+     * The characters the viewer sends for Shift+0 ... Shift+9 (it sends the resulting character, not the
+     * key). Default is the US layout; Italian, for example, is {@code =!"£$%&/()}.
+     */
+    private final String shiftedDigits = Settings.get("digits", ")!@#$%^&*(");
+
+    /**
+     * Ctrl+Shift+digit switches to the tab with that number, Ctrl+Shift+Tab to the next window.
+     *
+     * @return true if it switched windows, so the key must not reach the application
+     */
+    boolean handleShortcut(int keysym) {
+        int target = shortcutTarget(keysym, shiftedDigits);
+        if (target == CYCLE) return cycle();
+        return target >= 0 && switchTo(target);
+    }
+
+    /** A zero-based tab index, {@link #CYCLE}, or {@link #NONE}. 1 is the first tab and 0 the tenth. */
+    static int shortcutTarget(int keysym, String shiftedDigits) {
+        if (keysym == 0xff09 || keysym == 0xfe20) return CYCLE; // Tab, ISO_Left_Tab
+        int digit = -1;
+        if (keysym >= '0' && keysym <= '9') {
+            digit = keysym - '0';
+        } else if (keysym > 0 && keysym < 0x10000) {
+            int p = shiftedDigits.indexOf((char) keysym);
+            if (p >= 0 && p <= 9) digit = p;
+        }
+        return digit < 0 ? NONE : digit == 0 ? 9 : digit - 1;
+    }
+
+    private boolean switchTo(int index) {
+        if (index >= topLevels.size()) return false;
+        show(topLevels.get(index));
+        return true;
+    }
+
+    private boolean cycle() {
+        if (topLevels.size() < 2) return false;
+        int i = topLevels.indexOf(visible);
+        show(topLevels.get((i + 1) % topLevels.size()));
+        return true;
+    }
+
     // ------------------------------------------------------------------ events
 
     private void adopt(Window w) {
@@ -183,11 +231,12 @@ final class WindowManager {
 
     private void refreshStrip() {
         tabs.getChildren().clear();
-        for (Stage t : topLevels) {
+        for (int i = 0; i < topLevels.size(); i++) {
+            Stage t = topLevels.get(i);
             String title = t.getTitle() == null || t.getTitle().isBlank() ? "(untitled)" : t.getTitle();
             boolean active = t == visible;
 
-            Button tab = new Button(title);
+            Button tab = new Button(number(i) + title);
             tab.setMaxWidth(260);
             tab.setStyle(style(active, "3 8 3 10"));
             tab.setOnAction(e -> show(t));
@@ -198,6 +247,11 @@ final class WindowManager {
 
             tabs.getChildren().add(new HBox(0, tab, close));
         }
+    }
+
+    /** Tab label prefix: 1..9, then 0 for the tenth (the order of the digit row), none after that. */
+    private static String number(int index) {
+        return index < 9 ? (index + 1) + " " : index == 9 ? "0 " : "";
     }
 
     private static String style(boolean active, String padding) {

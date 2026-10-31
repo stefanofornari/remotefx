@@ -21,8 +21,10 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.zip.Deflater;
 
@@ -123,6 +125,7 @@ public final class VncServer {
     private int lastMask;
     private Stage activeWindow; // window of the last button press
     private WindowManager wm;     // null when the window manager is off
+    private final Set<Integer> swallowed = new HashSet<>(); // keys whose press was a window shortcut
     private boolean shift, ctrl, alt, meta;
 
     private ServerSocket serverSocket;
@@ -457,6 +460,18 @@ public final class VncServer {
     private void onKey(boolean down, int keysym) {
         unchangedFrames = 0;
         if (DEBUG) info("key " + (down ? "down" : "up") + " 0x" + Integer.toHexString(keysym));
+        if (wm != null) {
+            if (!down && swallowed.remove(keysym)) return; // the release of a shortcut we handled
+            if (down && ctrl && shift && !alt && !meta) {
+                if (wm.handleShortcut(keysym)) {
+                    swallowed.add(keysym);
+                    return;
+                }
+                if (DEBUG && !SPECIAL.containsKey(keysym)) {
+                    info("Ctrl+Shift+0x" + Integer.toHexString(keysym) + " is not a window shortcut here");
+                }
+            }
+        }
         Node target = focusTarget();
         if (target == null) return;
         if (DEBUG && down) info("key target: " + target.getClass().getSimpleName() + " in "
