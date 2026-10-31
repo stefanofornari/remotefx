@@ -76,12 +76,11 @@ with these JVM flags:
 -Dheadless.geometry=1280x800-32
 ```
 
-and put the Monocle jar on the **classpath**. It is a dependency of this project, so after
-`mvn package` it is in your local Maven repository:
-
-```
-~/.m2/repository/org/testfx/openjfx-monocle/21.0.2/openjfx-monocle-21.0.2.jar
-```
+Monocle itself needs no extra jar on your side: `target/remotefx.jar` is a fat jar that already
+contains it (Monocle is pure Java, with no native code of its own; the software rendering comes
+from JavaFX). Classes in an agent jar are visible to the whole application, so no `-cp` entry is
+needed. JavaFX is deliberately not bundled, since it carries per-OS natives and your application
+already provides it.
 
 `headless.geometry` is the size and colour depth of the virtual screen, which is what the viewer
 shows.
@@ -93,15 +92,14 @@ export VNC_PASSWORD=secret12
 java -javaagent:/path/to/remotefx/target/remotefx.jar=port=5900,bind=0.0.0.0 \
      -Dglass.platform=Monocle -Dmonocle.platform=Headless \
      -Dprism.order=sw -Dprism.text=t2k -Dheadless.geometry=1280x800-32 \
-     -cp yourapp.jar:/path/to/openjfx-monocle-21.0.2.jar \
+     -cp yourapp.jar \
      your.Main
 ```
 
 ### Module-path applications
 
-**Untested.** If your application starts with `--module-path ... --add-modules javafx...`, Monocle
-still goes on the classpath (`-cp`, appended to any classpath you already use), but its classes
-then live in the unnamed module and need access to JavaFX internals that `javafx.graphics` does
+**Untested.** If your application starts with `--module-path ... --add-modules javafx...`, the
+Monocle classes (they come with the agent jar) live in the unnamed module and need access to JavaFX internals that `javafx.graphics` does
 not export. Add the exports as `--add-exports` flags:
 
 ```
@@ -196,3 +194,8 @@ up in the process list). There is a `-Dvnc.password` fallback, but it is visible
 - `VncServer`: the RFB 3.8 server (handshake, password challenge, framebuffer updates, input).
 - `VncAgent`: the `premain` entry point that waits for the toolkit and a first window.
 - `Demo` and `Launcher`: a small UI with a few controls, to try things out.
+
+## Licence note
+
+`target/remotefx.jar` redistributes `org.testfx:openjfx-monocle`, which is derived from OpenJFX
+(GPL v2 with the Classpath Exception). Check its licence before you redistribute the fat jar.
