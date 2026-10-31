@@ -108,6 +108,7 @@ public final class VncServer {
     private int blankFrames;
     private int lastMask;
     private Stage activeWindow; // window of the last button press
+    private WindowManager wm;     // null when the window manager is off
     private boolean shift, ctrl, alt, meta;
 
     private ServerSocket serverSocket;
@@ -150,13 +151,19 @@ public final class VncServer {
 
     private void doStart() throws IOException {
         robot = new Robot();
-        Window.getWindows().addListener((ListChangeListener<Window>) c -> {
-            while (c.next()) {
-                if (c.wasAdded() && c.getAddedSubList().stream().anyMatch(w -> w instanceof Stage)) {
-                    activeWindow = null; // a new window (a dialog, say) gets the keys until the next click
+        boolean monocle = "Monocle".equalsIgnoreCase(System.getProperty("glass.platform"));
+        if (Boolean.parseBoolean(Settings.get("wm", String.valueOf(monocle)))) {
+            wm = new WindowManager(s -> activeWindow = s);
+            info("window manager: one top-level window visible at a time, filling the screen");
+        } else {
+            Window.getWindows().addListener((ListChangeListener<Window>) c -> {
+                while (c.next()) {
+                    if (c.wasAdded() && c.getAddedSubList().stream().anyMatch(w -> w instanceof Stage)) {
+                        activeWindow = null; // a new window (a dialog, say) gets the keys until the next click
+                    }
                 }
-            }
-        });
+            });
+        }
         Rectangle2D b = Screen.getPrimary().getBounds();
         width = (int) b.getWidth();
         height = (int) b.getHeight();
@@ -247,12 +254,13 @@ public final class VncServer {
         for (Window w : Window.getWindows()) {
             Scene s = w.getScene();
             if (s == null || !w.isShowing()) continue;
+            int ox = (int) Math.round(w.getX() + s.getX());
+            int oy = (int) Math.round(w.getY() + s.getY());
+            if (ox >= width || oy >= height || ox + w.getWidth() <= 0 || oy + w.getHeight() <= 0) continue; // off-screen
             WritableImage snap = s.snapshot(null);
             int sw = (int) snap.getWidth(), sh = (int) snap.getHeight();
             int[] sp = new int[sw * sh];
             snap.getPixelReader().getPixels(0, 0, sw, sh, WritablePixelFormat.getIntArgbInstance(), sp, 0, sw);
-            int ox = (int) Math.round(w.getX() + s.getX());
-            int oy = (int) Math.round(w.getY() + s.getY());
             for (int y = 0; y < sh; y++) {
                 int dy = oy + y;
                 if (dy < 0 || dy >= height) continue;
@@ -304,10 +312,11 @@ public final class VncServer {
     }
 
     /** Topmost (most recently shown) application window containing the screen point, or null. */
-    private static Stage windowAt(int x, int y) {
+    private Stage windowAt(int x, int y) {
         List<Window> all = Window.getWindows();
         for (int i = all.size() - 1; i >= 0; i--) {
             if (all.get(i) instanceof Stage s && s.isShowing() && s.getScene() != null
+                    && !(wm != null && wm.isInternal(s))
                     && x >= s.getX() && x < s.getX() + s.getWidth()
                     && y >= s.getY() && y < s.getY() + s.getHeight()) {
                 return s;
@@ -393,7 +402,7 @@ public final class VncServer {
     private Node focusTarget() {
         Window focused = null, lastShown = null;
         for (Window w : Window.getWindows()) {
-            if (w.getScene() == null || !w.isShowing()) continue;
+            if (w.getScene() == null || !w.isShowing() || (wm != null && wm.isInternal(w))) continue;
             if (w.isFocused()) focused = w; // keep going: the last focused one wins
             lastShown = w;
         }

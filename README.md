@@ -83,13 +83,10 @@ needed. JavaFX is deliberately not bundled, since it carries per-OS natives and 
 already provides it.
 
 `headless.geometry` is the size and colour depth of the virtual screen, which is what the viewer
-shows. Applications often centre their windows on the
-screen, so a screen that is too small pushes windows partly off its edges (a pair of 800x600
-windows on a 1280x800 screen sits at x=-160 and x=640). Make it large enough for all the windows of
-your application to fit side by side (for example `2560x1440-32`): the viewer only shows this
-screen, and a window placed outside it cannot be reached. A bigger screen costs more CPU per
-captured frame. In the viewer, use its scale-to-fit option if the screen is larger than your
-display.
+shows. The viewer shows exactly this screen, and the
+[window manager](#window-management) (on by default under Monocle) makes the application's
+window fill it, so pick the size you want to see. A bigger screen costs more CPU per captured
+frame. In the viewer, use its scale-to-fit option if the screen is larger than your display.
 
 Classpath application, complete example:
 
@@ -146,6 +143,27 @@ You can also use the agent in a normal desktop session, but then the viewer sees
 real screen** (not only your app), and the viewer's mouse moves the physical pointer. That is
 useful only for a quick test.
 
+## Window management
+
+Monocle has no window manager, so remotefx brings a very small one, built for a single application
+(`WindowManager`). It is on by default under Monocle and off elsewhere (`wm=false` turns it off,
+`wm=true` forces it on).
+
+- **One top-level window is visible at a time** (a stage with no owner that is not modal), and it is
+  resized to fill the screen. The others are parked just outside the right edge, so they are neither
+  drawn nor clickable. A window the application shows later becomes the visible one.
+- **Tab strip.** With two or more top-level windows, a strip along the top shows one tab per window
+  (its title, and a close button that sends a normal close request, so the application's close
+  handlers still run). Click a tab to switch. With a single window there is no strip and no chrome.
+- **Dialogs** (owned or modal stages) keep their own size and are centred over the content area.
+  A dialog that belongs to a parked window brings that window back first.
+- **Popups** (menus, combo boxes, tooltips) are not touched.
+- **Keyboard** goes to the topmost dialog, otherwise to the visible window.
+
+There is no minimize, maximize, move, resize or overlapping windows. An application that positions or
+sizes its own windows after they appear will fight this, and one that saves its window geometry will
+save the forced size. If that is a problem, use `wm=false`.
+
 ## Options
 
 Agent options are `key=value` pairs separated by commas in the `-javaagent` argument. Each
@@ -159,6 +177,7 @@ works without touching the `-javaagent` line.
 | `bind`    | `127.0.0.1` | Address to bind. `0.0.0.0` listens on all interfaces                 | `VNC_BIND`        |
 | `capture` | `robot`     | `robot` grabs the screen; `scene` snapshots each window instead      | `VNC_CAPTURE`     |
 | `debug`   | `false`     | Trace pointer, key, pixel-format and update events on stderr         | `VNC_DEBUG`       |
+| `wm`      | on with Monocle | `true`/`false`: the [window manager](#window-management)                  | `VNC_WM`          |
 
 The password is **only** read from the `VNC_PASSWORD` environment variable (so it does not show
 up in the process list). There is a `-Dvnc.password` fallback, but it is visible in `ps`.
@@ -182,7 +201,7 @@ up in the process list). There is a `-Dvnc.password` fallback, but it is visible
 | `Unable to open DISPLAY` | No display. Use the Monocle flags above, or Xvfb. |
 | `JavaFX runtime components are missing` | Running a class that extends `Application` from the classpath. Start it through a plain `main` class that calls `Application.launch`, as `spike.vnc.Launcher` does. |
 | Connects but the screen is black | Run with `VNC_DEBUG=true` and look at the `[vnc]` lines: capture mode, window count, `first frame captured`. Try `capture=scene`. Make sure the agent saw a showing window. |
-| A window is cut off or unreachable | The virtual screen is too small for the application's windows. Raise `-Dheadless.geometry=WIDTHxHEIGHT-32`. |
+| A window is cut off or unreachable | With the window manager off, the virtual screen may be smaller than the application's windows: raise `-Dheadless.geometry=WIDTHxHEIGHT-32` or turn `wm` on. |
 | Mouse works but typing does nothing | Keys go to the window you last clicked. Click inside the window (on the text field) first. Enable debug (`VNC_DEBUG=true` for `run.sh`, `debug=true` in the `-javaagent` argument) and check the `key target:` lines: they show which window and node receive the keys. |
 | Cannot connect from another machine | Server bound to `127.0.0.1` (the default). Set `bind=0.0.0.0` and check the firewall. |
 | `IllegalAccessError` mentioning a `com.sun...` package | Module-path app: add the matching `--add-exports`, see above. |
@@ -194,9 +213,8 @@ up in the process list). There is a `-Dvnc.password` fallback, but it is visible
   only the changed ones, but it grabs the screen about 25 times per second while a viewer is
   connected, even when nothing changes.
 - All viewers share the one screen.
-- **No window decorations.** Monocle has no window manager, so there are no title bars and you cannot
-  move, resize or close windows with the mouse. Windows appear where the application puts them.
-  Running under Xvfb with a window manager (see above) gives real decorations.
+- **Minimal window management.** One visible top-level window at a time, switched with the tab strip: no
+  floating windows, minimize, maximize, move or resize (see [Window management](#window-management)).
 - No clipboard transfer, no cursor shape, no encryption.
 - `Alt` is ignored for text input so that AltGr characters (`@`, `#`, ...) can be typed, which
   means `Alt+letter` mnemonics do not work.
@@ -206,6 +224,7 @@ up in the process list). There is a `-Dvnc.password` fallback, but it is visible
 
 - `VncServer`: the RFB 3.8 server (handshake, password challenge, framebuffer updates, input).
 - `VncAgent`: the `premain` entry point that waits for the toolkit and a first window.
+- `WindowManager`: the window policy and the tab strip.
 - `Demo` and `Launcher`: a small UI with a few controls, to try things out.
 
 ## Licence note
