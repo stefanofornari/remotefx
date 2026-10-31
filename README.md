@@ -180,7 +180,7 @@ up in the process list). There is a `-Dvnc.password` fallback, but it is visible
 | `JavaFX runtime components are missing` | Running a class that extends `Application` from the classpath. Start it through a plain `main` class that calls `Application.launch`, as `spike.vnc.Launcher` does. |
 | Connects but the screen is black | Run with `VNC_DEBUG=true` and look at the `[vnc]` lines: capture mode, window count, `first frame captured`. Try `capture=scene`. Make sure the agent saw a showing window. |
 | A window is cut off or unreachable | The virtual screen is too small for the application's windows. Raise `-Dheadless.geometry=WIDTHxHEIGHT-32`. |
-| Mouse works but typing does nothing | Keys go to the window you last clicked. Click inside the window (on the text field) first. Run with `VNC_DEBUG=true` and check the `key target:` lines: they show which window and node receive the keys. |
+| Mouse works but typing does nothing | Keys go to the window you last clicked. Click inside the window (on the text field) first. Enable debug (`VNC_DEBUG=true` for `run.sh`, `debug=true` in the `-javaagent` argument) and check the `key target:` lines: they show which window and node receive the keys. |
 | Cannot connect from another machine | Server bound to `127.0.0.1` (the default). Set `bind=0.0.0.0` and check the firewall. |
 | `IllegalAccessError` mentioning a `com.sun...` package | Module-path app: add the matching `--add-exports`, see above. |
 | Keys type the wrong character | Keys are sent as synthetic `KeyEvent`s using the keysym the viewer sends. Report the layout and the characters. |

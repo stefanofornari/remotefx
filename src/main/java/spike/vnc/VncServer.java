@@ -309,10 +309,27 @@ public final class VncServer {
     }
 
     private void activate(Stage s) {
-        if (s == null) return;
+        if (DEBUG) dumpWindows();
+        if (s == null) {
+            if (DEBUG) info("click outside every window");
+            return;
+        }
         activeWindow = s;
         if (!s.isFocused()) s.requestFocus();
-        if (DEBUG) info("active window: " + s.getTitle() + " focused=" + s.isFocused());
+        if (DEBUG) {
+            Node owner = s.getScene().getFocusOwner();
+            info("active window: '" + s.getTitle() + "' focused=" + s.isFocused()
+                    + " focusOwner=" + (owner == null ? "none" : owner.getClass().getSimpleName() + " focused=" + owner.isFocused()));
+        }
+    }
+
+    private static void dumpWindows() {
+        for (Window w : Window.getWindows()) {
+            info("  window " + w.getClass().getSimpleName()
+                    + (w instanceof Stage st ? " '" + st.getTitle() + "'" : "")
+                    + " showing=" + w.isShowing() + " focused=" + w.isFocused()
+                    + " at " + (int) w.getX() + "," + (int) w.getY() + " size " + (int) w.getWidth() + "x" + (int) w.getHeight());
+        }
     }
 
     private void key(boolean down, int keysym) {
