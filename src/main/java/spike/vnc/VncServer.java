@@ -154,11 +154,14 @@ public final class VncServer {
         InetAddress bind = InetAddress.getByName(System.getProperty("vnc.bind", "127.0.0.1"));
         serverSocket = new ServerSocket(port, 4, bind);
         if (!password.isEmpty()) {
-            info("password authentication enabled (VNC authentication only uses the first 8 characters)");
-        } else if (!bind.isLoopbackAddress()) {
-            info("WARNING: listening on " + bind.getHostAddress() + " without a password: "
-                    + "anyone who can reach port " + port + " can control this UI (set VNC_PASSWORD)");
+            info("authentication: password (VNC authentication only uses the first 8 characters)");
+        } else {
+            info("authentication: NONE (set VNC_PASSWORD; macOS Screen Sharing refuses servers without one)");
+            if (!bind.isLoopbackAddress()) {
+                info("WARNING: anyone who can reach " + bind.getHostAddress() + ":" + port + " can control this UI");
+            }
         }
+        info("capture mode: " + (useScenes ? "scene" : "robot") + ", windows showing: " + Window.getWindows().size());
         Thread acceptor = new Thread(this::acceptLoop, "vnc-accept");
         acceptor.setDaemon(true);
         acceptor.start();

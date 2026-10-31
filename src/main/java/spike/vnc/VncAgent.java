@@ -2,8 +2,11 @@ package spike.vnc;
 
 import java.io.IOException;
 import java.lang.instrument.Instrumentation;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 
 import javafx.application.Platform;
+import javafx.stage.Window;
 
 /**
  * Java agent that attaches the VNC server to any JavaFX application without touching its code:
@@ -35,26 +38,43 @@ public final class VncAgent {
         t.start();
     }
 
-    /** Platform.runLater throws IllegalStateException until the application has started the FX toolkit. */
+    /**
+     * Platform.runLater throws IllegalStateException until the application has started the FX toolkit.
+     * Once it is up, we still wait for the first showing window, so capture never starts on an empty screen.
+     */
     private static void startWhenToolkitIsUp() {
         int port = Integer.getInteger("vnc.port", 5900);
         while (true) {
             try {
-                Platform.runLater(() -> {
-                    try {
-                        VncServer.start(port);
-                    } catch (IOException | RuntimeException e) {
-                        System.err.println("[vnc] agent could not start the server: " + e);
-                    }
-                });
-                return;
-            } catch (IllegalStateException toolkitNotReady) {
-                try {
-                    Thread.sleep(200);
-                } catch (InterruptedException e) {
+                CompletableFuture<Boolean> shown = new CompletableFuture<>();
+                Platform.runLater(() -> shown.complete(anyWindowShowing()));
+                if (shown.get()) {
+                    Platform.runLater(() -> {
+                        try {
+                            VncServer.start(port);
+                        } catch (IOException | RuntimeException e) {
+                            System.err.println("[vnc] agent could not start the server: " + e);
+                        }
+                    });
                     return;
                 }
+            } catch (IllegalStateException toolkitNotReady) {
+                // toolkit not started yet: keep polling
+            } catch (InterruptedException | ExecutionException e) {
+                return;
+            }
+            try {
+                Thread.sleep(200);
+            } catch (InterruptedException e) {
+                return;
             }
         }
+    }
+
+    private static boolean anyWindowShowing() {
+        for (Window w : Window.getWindows()) {
+            if (w.isShowing()) return true;
+        }
+        return false;
     }
 }
