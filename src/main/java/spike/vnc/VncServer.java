@@ -95,6 +95,8 @@ public final class VncServer {
     private Robot robot;
     private AnimationTimer timer;
     private long lastCaptureNanos;
+    private boolean useScenes = "scene".equalsIgnoreCase(System.getProperty("vnc.capture", "robot"));
+    private int blankFrames;
     private int lastMask;
     private boolean shift, ctrl, alt, meta;
 
@@ -136,7 +138,12 @@ public final class VncServer {
         width = (int) b.getWidth();
         height = (int) b.getHeight();
 
-        serverSocket = new ServerSocket(port, 4, InetAddress.getLoopbackAddress());
+        InetAddress bind = InetAddress.getByName(System.getProperty("vnc.bind", "127.0.0.1"));
+        serverSocket = new ServerSocket(port, 4, bind);
+        if (!bind.isLoopbackAddress()) {
+            info("WARNING: listening on " + bind.getHostAddress() + " without authentication: "
+                    + "anyone who can reach port " + port + " can control this UI");
+        }
         Thread acceptor = new Thread(this::acceptLoop, "vnc-accept");
         acceptor.setDaemon(true);
         acceptor.start();
@@ -148,7 +155,7 @@ public final class VncServer {
             }
         };
         timer.start();
-        info("listening on 127.0.0.1:" + port + ", screen " + width + "x" + height);
+        info("listening on " + bind.getHostAddress() + ":" + port + ", screen " + width + "x" + height);
     }
 
     private void acceptLoop() {
@@ -171,18 +178,79 @@ public final class VncServer {
         if (clients.isEmpty() || now - lastCaptureNanos < MIN_FRAME_NANOS) return;
         lastCaptureNanos = now;
 
-        WritableImage img = robot.getScreenCapture(null, 0, 0, width, height);
-        if ((int) img.getWidth() != width || (int) img.getHeight() != height) {
-            info("capture is " + img.getWidth() + "x" + img.getHeight() + ", expected " + width + "x" + height + " (HiDPI scaling?)");
+        int[] px = useScenes ? captureScenes() : captureRobot();
+        if (px == null) return;
+        if (!useScenes && isBlank(px) && hasShowingWindow()) {
+            if (++blankFrames >= 5) {
+                info("robot capture is all black; switching to per-window scene snapshots (same as -Dvnc.capture=scene)");
+                useScenes = true;
+            }
             return;
         }
-        int[] px = new int[width * height];
-        img.getPixelReader().getPixels(0, 0, width, height, WritablePixelFormat.getIntArgbInstance(), px, 0, width);
+        if (DEBUG && frameSeq == 0) info("first frame captured (" + (useScenes ? "scene" : "robot") + ")");
         synchronized (frameLock) {
             framePixels = px;
             frameSeq++;
             frameLock.notifyAll();
         }
+    }
+
+    /** Whole-screen grab through the platform robot; null if unusable. */
+    private int[] captureRobot() {
+        try {
+            WritableImage img = robot.getScreenCapture(null, 0, 0, width, height);
+            if ((int) img.getWidth() != width || (int) img.getHeight() != height) {
+                info("capture is " + img.getWidth() + "x" + img.getHeight() + ", expected " + width + "x" + height + " (HiDPI scaling?)");
+                return null;
+            }
+            int[] px = new int[width * height];
+            img.getPixelReader().getPixels(0, 0, width, height, WritablePixelFormat.getIntArgbInstance(), px, 0, width);
+            return px;
+        } catch (RuntimeException e) {
+            info("robot capture failed (" + e + "); switching to per-window scene snapshots");
+            useScenes = true;
+            return null;
+        }
+    }
+
+    /** Fallback: snapshot every showing window (popups included) and paint it at its screen position. */
+    private int[] captureScenes() {
+        int[] px = new int[width * height];
+        for (Window w : Window.getWindows()) {
+            Scene s = w.getScene();
+            if (s == null || !w.isShowing()) continue;
+            WritableImage snap = s.snapshot(null);
+            int sw = (int) snap.getWidth(), sh = (int) snap.getHeight();
+            int[] sp = new int[sw * sh];
+            snap.getPixelReader().getPixels(0, 0, sw, sh, WritablePixelFormat.getIntArgbInstance(), sp, 0, sw);
+            int ox = (int) Math.round(w.getX() + s.getX());
+            int oy = (int) Math.round(w.getY() + s.getY());
+            for (int y = 0; y < sh; y++) {
+                int dy = oy + y;
+                if (dy < 0 || dy >= height) continue;
+                for (int x = 0; x < sw; x++) {
+                    int dx = ox + x;
+                    if (dx < 0 || dx >= width) continue;
+                    int p = sp[y * sw + x];
+                    if ((p >>> 24) != 0) px[dy * width + dx] = p;
+                }
+            }
+        }
+        return px;
+    }
+
+    private static boolean isBlank(int[] px) {
+        for (int p : px) {
+            if ((p & 0xffffff) != 0) return false;
+        }
+        return true;
+    }
+
+    private static boolean hasShowingWindow() {
+        for (Window w : Window.getWindows()) {
+            if (w.isShowing() && w.getScene() != null) return true;
+        }
+        return false;
     }
 
     // ------------------------------------------------------------------ input (marshalled to the FX thread)
@@ -422,6 +490,7 @@ public final class VncServer {
                     case 0 -> { // SetPixelFormat
                         in.skipNBytes(3);
                         PixelFmt p = PixelFmt.read(in);
+                        if (DEBUG) info("SetPixelFormat " + p);
                         if (p.supported()) pf = p;
                         else info("unsupported pixel format requested: " + p);
                     }
@@ -497,6 +566,7 @@ public final class VncServer {
 
         private void writeUpdate(int[] px, List<int[]> rects, PixelFmt f) throws IOException {
             boolean fast = f.equals(PixelFmt.DEFAULT);
+            if (DEBUG) info("sending update: " + rects.size() + " rect(s), format " + f);
             int bytesPP = f.bpp() / 8;
             byte[] row = new byte[width * 4];
 
@@ -517,7 +587,7 @@ public final class VncServer {
                             row[o] = (byte) p;
                             row[o + 1] = (byte) (p >> 8);
                             row[o + 2] = (byte) (p >> 16);
-                            row[o + 3] = 0;
+                            row[o + 3] = (byte) 0xff; // unused byte; opaque in case a viewer treats it as alpha
                             o += 4;
                         } else {
                             f.encode(p, row, o);
