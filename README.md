@@ -225,9 +225,11 @@ up in the process list). There is a `-Dvnc.password` fallback, but it is visible
 
 ## Limitations
 
-- Raw encoding only, so bandwidth is high on slow links. The server compares 64x64 tiles and sends
-  only the changed ones, but it grabs the screen about 25 times per second while a viewer is
-  connected, even when nothing changes.
+- Encodings: ZRLE, CopyRect (vertical scrolls) and Raw; a viewer that offers neither of the first two
+  gets Raw, which needs a lot of bandwidth. Only changed pixels are sent, trimmed per 64x64 tile and
+  limited to the area the viewer asks for. The screen is grabbed up to 25 times per second while a
+  viewer is waiting for an update, and about 5 times per second once it stops changing.
+  There is no Hextile or Tight.
 - All viewers share the one screen.
 - **Minimal window management.** One visible top-level window at a time, switched with the tab strip: no
   floating windows, minimize, maximize, move or resize (see [Window management](#window-management)).

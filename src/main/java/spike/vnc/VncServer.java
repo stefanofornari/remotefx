@@ -69,6 +69,7 @@ public final class VncServer {
     private static final long MIN_FRAME_NANOS = 40_000_000L; // cap capture at ~25 fps
     private static final long IDLE_FRAME_NANOS = 200_000_000L; // capture rate once the screen stopped changing
     private static final int IDLE_AFTER = 10; // identical captures in a row before slowing down
+    private static final int ENCODING_COPYRECT = 1;
     private static final int ENCODING_ZRLE = 16;
     private static final VarHandle INT_LE = MethodHandles.byteArrayViewVarHandle(int[].class, ByteOrder.LITTLE_ENDIAN);
     private static final boolean DEBUG = Settings.bool("debug");
@@ -650,14 +651,16 @@ public final class VncServer {
         private DataInputStream in;
         private DataOutputStream out;
         private volatile PixelFmt pf = PixelFmt.DEFAULT;
-        private volatile boolean zrle;
+        private volatile boolean zrle, copyRect;
         private volatile boolean pending; // written under frameLock
 
         // guarded by frameLock
-        private boolean forceFull, closed;
+        private boolean forceFull, closed, requested;
+        private int reqX0, reqY0, reqX1, reqY1; // union of the update requests received since the last update
 
         // sender thread only
-        private Frame prev;
+        private final FrameDiff diff = new FrameDiff(width, height);
+        private Frame prev; // what the diff is measured against
         private long lastSeq;
         private byte[] row = new byte[0];
         private PixelFmt lutFmt;
@@ -783,20 +786,36 @@ public final class VncServer {
                         if (p.supported()) pf = p;
                         else info("unsupported pixel format requested: " + p);
                     }
-                    case 2 -> { // SetEncodings: we speak ZRLE and Raw
+                    case 2 -> { // SetEncodings: we speak ZRLE, CopyRect and Raw
                         in.skipNBytes(1);
                         int n = in.readUnsignedShort();
-                        boolean z = false;
+                        boolean z = false, c = false;
                         for (int i = 0; i < n; i++) {
-                            if (in.readInt() == ENCODING_ZRLE) z = true;
+                            int e = in.readInt();
+                            if (e == ENCODING_ZRLE) z = true;
+                            if (e == ENCODING_COPYRECT) c = true;
                         }
                         zrle = z;
+                        copyRect = c;
                     }
                     case 3 -> { // FramebufferUpdateRequest
                         boolean incremental = in.readUnsignedByte() != 0;
-                        in.skipNBytes(8); // x, y, w, h: we always consider the whole screen
+                        int x0 = in.readUnsignedShort(), y0 = in.readUnsignedShort();
+                        int x1 = x0 + in.readUnsignedShort(), y1 = y0 + in.readUnsignedShort();
                         synchronized (frameLock) {
+                            if (pending) {
+                                reqX0 = Math.min(reqX0, x0);
+                                reqY0 = Math.min(reqY0, y0);
+                                reqX1 = Math.max(reqX1, x1);
+                                reqY1 = Math.max(reqY1, y1);
+                            } else {
+                                reqX0 = x0;
+                                reqY0 = y0;
+                                reqX1 = x1;
+                                reqY1 = y1;
+                            }
                             pending = true;
+                            requested = true;
                             if (!incremental) forceFull = true;
                             frameLock.notifyAll();
                         }
@@ -827,8 +846,9 @@ public final class VncServer {
                     Frame cur;
                     long seq;
                     boolean full;
+                    int rx0, ry0, rx1, ry1;
                     synchronized (frameLock) {
-                        while (!closed && !(pending && current != null && (forceFull || frameSeq != lastSeq))) {
+                        while (!closed && !(pending && current != null && (requested || frameSeq != lastSeq))) {
                             frameLock.wait(1000);
                         }
                         if (closed) return;
@@ -837,22 +857,37 @@ public final class VncServer {
                         seq = frameSeq;
                         full = forceFull;
                         forceFull = false;
+                        requested = false;
+                        rx0 = reqX0;
+                        ry0 = reqY0;
+                        rx1 = Math.min(reqX1, width);
+                        ry1 = Math.min(reqY1, height);
                     }
-                    List<int[]> rects = (full || prev == null)
-                            ? List.of(new int[]{0, 0, width, height})
-                            : diff(prev.px, cur.px);
+                    int[] copy = null;
+                    boolean inSync = diff.isClean(); // the client shows exactly prev
+                    if (prev == null) {
+                        diff.markRegion(0, 0, width, height);
+                    } else if (seq != lastSeq) {
+                        diff.update(prev.px, cur.px, null);
+                        if (copyRect && inSync && !full) {
+                            copy = findCopy(prev.px, cur.px, rx0, ry0, rx1, ry1);
+                            if (copy != null) {
+                                diff.clear();
+                                diff.update(prev.px, cur.px, copy);
+                            }
+                        }
+                    }
+                    if (full) diff.markRegion(rx0, ry0, rx1, ry1);
                     lastSeq = seq;
-                    if (rects.isEmpty()) { // nothing changed: keep the request pending
-                        release(cur);
-                        continue;
-                    }
-                    synchronized (frameLock) {
-                        pending = false;
-                    }
                     Frame old = prev;
                     prev = cur;
                     release(old);
-                    writeUpdate(cur.px, rects, pf);
+                    List<int[]> rects = diff.take(rx0, ry0, rx1, ry1);
+                    if (rects.isEmpty() && copy == null) continue; // nothing to send: keep the request pending
+                    synchronized (frameLock) {
+                        pending = false;
+                    }
+                    writeUpdate(cur.px, copy, rects, pf);
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -866,13 +901,31 @@ public final class VncServer {
             }
         }
 
-        private void writeUpdate(int[] px, List<int[]> rects, PixelFmt f) throws IOException {
+        /** A scroll worth sending as CopyRect, if the changes look like one and the client asked for all of it. */
+        private int[] findCopy(int[] a, int[] b, int rx0, int ry0, int rx1, int ry1) {
+            int[] bounds = diff.dirtyBounds();
+            if (bounds[4] < FrameDiff.MIN_SCROLL_TILES) return null;
+            int[] c = diff.findScroll(a, b, bounds);
+            if (c == null || c[0] < rx0 || c[1] < ry0 || c[0] + c[2] > rx1 || c[1] + c[3] > ry1) return null;
+            return c;
+        }
+
+        private void writeUpdate(int[] px, int[] copy, List<int[]> rects, PixelFmt f) throws IOException {
             prepare(f);
             boolean z = zrle;
-            if (DEBUG) info("sending update: " + rects.size() + " rect(s), format " + f + (z ? ", ZRLE" : ", Raw"));
+            if (DEBUG) {
+                info("sending update: " + rects.size() + " rect(s)" + (copy != null ? " + CopyRect" : "")
+                        + ", format " + f + (z ? ", ZRLE" : ", Raw"));
+            }
             out.writeByte(0); // FramebufferUpdate
             out.writeByte(0);
-            out.writeShort(rects.size());
+            out.writeShort(rects.size() + (copy != null ? 1 : 0));
+            if (copy != null) { // first: it reads pixels the client already has
+                for (int i = 0; i < 4; i++) out.writeShort(copy[i]);
+                out.writeInt(ENCODING_COPYRECT);
+                out.writeShort(copy[4]);
+                out.writeShort(copy[5]);
+            }
             for (int[] r : rects) {
                 out.writeShort(r[0]);
                 out.writeShort(r[1]);
@@ -1025,36 +1078,6 @@ public final class VncServer {
                 zinLen = encodeRun(tile, 0, n, zin, zinLen, f, compact);
             }
         }
-    }
-
-    // ------------------------------------------------------------------ tile diff
-
-    /** Changed tiles as {x, y, w, h}; horizontally adjacent changed tiles are merged into one rect. */
-    private List<int[]> diff(int[] a, int[] b) {
-        List<int[]> out = new ArrayList<>();
-        int tilesX = (width + TILE - 1) / TILE;
-        for (int ty = 0; ty < height; ty += TILE) {
-            int th = Math.min(TILE, height - ty);
-            int runStart = -1;
-            for (int i = 0; i <= tilesX; i++) {
-                int tx = i * TILE;
-                boolean changed = i < tilesX && tileChanged(a, b, tx, ty, Math.min(TILE, width - tx), th);
-                if (changed && runStart < 0) runStart = tx;
-                if (!changed && runStart >= 0) {
-                    out.add(new int[]{runStart, ty, Math.min(tx, width) - runStart, th});
-                    runStart = -1;
-                }
-            }
-        }
-        return out;
-    }
-
-    private boolean tileChanged(int[] a, int[] b, int tx, int ty, int tw, int th) {
-        for (int y = ty; y < ty + th; y++) {
-            int off = y * width + tx;
-            if (!Arrays.equals(a, off, off + tw, b, off, off + tw)) return true;
-        }
-        return false;
     }
 
     private static void info(String msg) {
