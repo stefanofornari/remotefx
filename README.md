@@ -98,23 +98,24 @@ java -javaagent:/path/to/remotefx/target/remotefx.jar=port=5900,bind=0.0.0.0 \
 
 ### Module-path applications
 
-**Untested.** If your application starts with `--module-path ... --add-modules javafx...`, the
-Monocle classes (they come with the agent jar) live in the unnamed module and need access to JavaFX internals that `javafx.graphics` does
-not export. Add the exports as `--add-exports` flags:
+If your application starts with `--module-path ... --add-modules javafx...`, the Monocle classes
+(which come with the agent jar) live in the unnamed module and need access to JavaFX internals
+that the `javafx.*` modules do not export. Without that, startup fails with:
 
 ```
---add-exports javafx.graphics/com.sun.glass.ui=ALL-UNNAMED
---add-exports javafx.graphics/com.sun.glass.events=ALL-UNNAMED
---add-exports javafx.graphics/com.sun.javafx.application=ALL-UNNAMED
---add-exports javafx.graphics/com.sun.javafx.geom=ALL-UNNAMED
---add-exports javafx.graphics/com.sun.javafx.tk=ALL-UNNAMED
---add-exports javafx.graphics/com.sun.javafx.util=ALL-UNNAMED
+IllegalAccessError: ... class com.sun.glass.ui.monocle.MonoclePlatformFactory ...
+cannot access class com.sun.glass.ui.PlatformFactory ... module javafx.graphics does not export
+com.sun.glass.ui to unnamed module
 ```
 
-That list is a starting point, not a verified one. If the JVM fails with an `IllegalAccessError`
-or `IllegalAccessException` that names a package (for example `package com.sun.xyz is not
-exported to unnamed module`), add one more
-`--add-exports javafx.graphics/com.sun.xyz=ALL-UNNAMED` for it and run again.
+The agent fixes this itself: at start-up it exports and opens every package of the `javafx.*`
+modules to the unnamed module, so no `--add-exports` flags are needed. (With
+`VNC_DEBUG=true` it logs `[vnc] opened N packages of javafx.graphics` and so on.) JavaFX on the
+plain classpath needs nothing of this.
+
+**Status:** the module-path case is untested beyond the error above. If you would rather not use
+this behaviour, add the exports by hand as `--add-exports javafx.graphics/<package>=ALL-UNNAMED`
+for each package the error names, and report it so the agent can be fixed.
 
 **Version match.** The published Monocle jars stop at 21.0.2. If your JavaFX is newer, Monocle may
 fail on changed internal APIs. Then the alternative below is the fallback.

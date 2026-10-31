@@ -2,6 +2,9 @@ package spike.vnc;
 
 import java.io.IOException;
 import java.lang.instrument.Instrumentation;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 
@@ -33,9 +36,33 @@ public final class VncAgent {
                 }
             }
         }
+        openJavaFxInternals(inst);
         Thread t = new Thread(VncAgent::startWhenToolkitIsUp, "vnc-agent");
         t.setDaemon(true);
         t.start();
+    }
+
+    /**
+     * Monocle lives in the unnamed module (it is bundled in this jar) but extends and calls JavaFX
+     * internals such as com.sun.glass.ui.PlatformFactory, which the javafx.* modules do not export.
+     * When the application runs JavaFX from the module path this fails with an IllegalAccessError, so
+     * export and open every package of the loaded javafx.* modules to the unnamed module here, instead
+     * of asking the user for a list of --add-exports flags. Does nothing when JavaFX is on the classpath.
+     */
+    private static void openJavaFxInternals(Instrumentation inst) {
+        Module unnamed = ClassLoader.getSystemClassLoader().getUnnamedModule();
+        for (Module m : ModuleLayer.boot().modules()) {
+            if (!m.isNamed() || !m.getName().startsWith("javafx.") || !inst.isModifiableModule(m)) continue;
+            Map<String, Set<Module>> packages = new HashMap<>();
+            for (String p : m.getPackages()) {
+                packages.put(p, Set.of(unnamed));
+            }
+            // (module, extraReads, extraExports, extraOpens, extraUses, extraProvides)
+            inst.redefineModule(m, Set.of(), packages, packages, Set.of(), Map.of());
+            if (Boolean.getBoolean("vnc.debug")) {
+                System.err.println("[vnc] opened " + packages.size() + " packages of " + m.getName());
+            }
+        }
     }
 
     /**
