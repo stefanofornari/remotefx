@@ -4,7 +4,8 @@
 # Environment variables:
 #   VNC_PORT     port to listen on                      (default 5900)
 #   VNC_BIND     address to bind; 0.0.0.0 = all         (default 127.0.0.1)
-#                NOTE: there is no authentication, so only expose it on a trusted network
+#   VNC_PASSWORD if set, clients must authenticate (VNC auth: only the first 8 characters count)
+#                Without VNC_PASSWORD there is NO authentication: do not expose that beyond a trusted network
 #   VNC_CAPTURE  robot | scene                          (default robot; falls back to scene if blank)
 #   VNC_DEBUG    true to trace pointer/key/format/update events on stderr
 set -euo pipefail

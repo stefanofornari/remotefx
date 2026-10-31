@@ -11,12 +11,18 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketException;
 import java.nio.charset.StandardCharsets;
+import java.security.GeneralSecurityException;
+import java.security.MessageDigest;
+import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
+
+import javax.crypto.Cipher;
+import javax.crypto.spec.SecretKeySpec;
 
 import javafx.animation.AnimationTimer;
 import javafx.application.Platform;
@@ -87,6 +93,7 @@ public final class VncServer {
     }
 
     private final int port;
+    private final String password; // empty = no authentication
     private final String desktopName = "JavaFX (Monocle)";
     private final List<Client> clients = new CopyOnWriteArrayList<>();
     private final Object frameLock = new Object();
@@ -109,6 +116,8 @@ public final class VncServer {
 
     private VncServer(int port) {
         this.port = port;
+        String pw = System.getenv("VNC_PASSWORD"); // env, so it does not show up in `ps`
+        this.password = pw != null ? pw : System.getProperty("vnc.password", "");
     }
 
     /** Starts listening on 127.0.0.1:port. Must be called on the FX application thread. */
@@ -140,9 +149,11 @@ public final class VncServer {
 
         InetAddress bind = InetAddress.getByName(System.getProperty("vnc.bind", "127.0.0.1"));
         serverSocket = new ServerSocket(port, 4, bind);
-        if (!bind.isLoopbackAddress()) {
-            info("WARNING: listening on " + bind.getHostAddress() + " without authentication: "
-                    + "anyone who can reach port " + port + " can control this UI");
+        if (!password.isEmpty()) {
+            info("password authentication enabled (VNC authentication only uses the first 8 characters)");
+        } else if (!bind.isLoopbackAddress()) {
+            info("WARNING: listening on " + bind.getHostAddress() + " without a password: "
+                    + "anyone who can reach port " + port + " can control this UI (set VNC_PASSWORD)");
         }
         Thread acceptor = new Thread(this::acceptLoop, "vnc-accept");
         acceptor.setDaemon(true);
@@ -350,6 +361,26 @@ public final class VncServer {
         return -1;
     }
 
+    // ------------------------------------------------------------------ VNC authentication helpers
+
+    /** VNC quirk: the DES key is the first 8 password bytes, each with its bits reversed. */
+    private static byte[] desKey(String password) {
+        byte[] pw = password.getBytes(StandardCharsets.ISO_8859_1);
+        byte[] key = new byte[8];
+        for (int i = 0; i < 8; i++) {
+            int b = i < pw.length ? pw[i] & 0xff : 0;
+            key[i] = (byte) (Integer.reverse(b) >>> 24);
+        }
+        return key;
+    }
+
+    private static boolean checkResponse(String password, byte[] challenge, byte[] response)
+            throws GeneralSecurityException {
+        Cipher des = Cipher.getInstance("DES/ECB/NoPadding");
+        des.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(desKey(password), "DES"));
+        return MessageDigest.isEqual(des.doFinal(challenge), response);
+    }
+
     // ------------------------------------------------------------------ pixel format
 
     private record PixelFmt(int bpp, boolean big, int rMax, int gMax, int bMax,
@@ -459,17 +490,20 @@ public final class VncServer {
             } catch (RuntimeException e) {
                 throw new IOException("bad protocol version string");
             }
+            int secType = password.isEmpty() ? 1 : 2; // 1 = None, 2 = VNC authentication
             if (minor >= 7) {
-                out.writeByte(1); // one security type...
-                out.writeByte(1); // ...None
+                out.writeByte(1); // one security type
+                out.writeByte(secType);
                 out.flush();
-                if (in.readUnsignedByte() != 1) throw new IOException("client rejected security type None");
-                if (minor >= 8) {
-                    out.writeInt(0); // SecurityResult OK
-                    out.flush();
-                }
+                if (in.readUnsignedByte() != secType) throw new IOException("client rejected security type " + secType);
             } else {
-                out.writeInt(1); // 3.3: server dictates security type None
+                out.writeInt(secType); // 3.3: the server dictates the security type
+                out.flush();
+            }
+            if (secType == 2) {
+                authenticate(minor);
+            } else if (minor >= 8) {
+                out.writeInt(0); // SecurityResult OK (None only has one from 3.8 on)
                 out.flush();
             }
             in.readUnsignedByte(); // ClientInit: shared flag, ignored
@@ -481,6 +515,34 @@ public final class VncServer {
             out.writeInt(name.length);
             out.write(name);
             out.flush();
+        }
+
+        /** Classic VNC authentication: 16 random bytes, answered with their DES encryption under the password. */
+        private void authenticate(int minor) throws IOException {
+            byte[] challenge = new byte[16];
+            new SecureRandom().nextBytes(challenge);
+            out.write(challenge);
+            out.flush();
+            byte[] response = in.readNBytes(16);
+            boolean ok;
+            try {
+                ok = response.length == 16 && checkResponse(password, challenge, response);
+            } catch (GeneralSecurityException e) {
+                throw new IOException("DES not available: " + e, e);
+            }
+            if (ok) {
+                out.writeInt(0); // SecurityResult OK
+                out.flush();
+                return;
+            }
+            out.writeInt(1); // failed
+            if (minor >= 8) {
+                byte[] reason = "Authentication failed".getBytes(StandardCharsets.US_ASCII);
+                out.writeInt(reason.length);
+                out.write(reason);
+            }
+            out.flush();
+            throw new IOException("authentication failed from " + socket.getRemoteSocketAddress());
         }
 
         private void readLoop() throws IOException {
