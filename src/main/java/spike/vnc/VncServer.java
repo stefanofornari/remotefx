@@ -38,6 +38,7 @@ import javafx.scene.input.KeyEvent;
 import javafx.scene.input.MouseButton;
 import javafx.scene.robot.Robot;
 import javafx.stage.Screen;
+import javafx.stage.Stage;
 import javafx.stage.Window;
 
 /**
@@ -105,6 +106,7 @@ public final class VncServer {
     private boolean useScenes = "scene".equalsIgnoreCase(System.getProperty("vnc.capture", "robot"));
     private int blankFrames;
     private int lastMask;
+    private Stage activeWindow; // window of the last button press
     private boolean shift, ctrl, alt, meta;
 
     private ServerSocket serverSocket;
@@ -277,6 +279,9 @@ public final class VncServer {
         Platform.runLater(() -> {
             if (DEBUG) info("pointer " + x + "," + y + " mask=" + mask);
             robot.mouseMove(x, y);
+            // With no window manager nothing ever takes focus: make the clicked window the active one
+            // (before the press, so the click lands in an already focused window) and send keys to it.
+            if ((mask & 7 & ~lastMask) != 0) activate(windowAt(x, y));
             for (int bit = 0; bit < 3; bit++) {
                 boolean now = ((mask >> bit) & 1) != 0;
                 boolean was = ((lastMask >> bit) & 1) != 0;
@@ -290,6 +295,26 @@ public final class VncServer {
         });
     }
 
+    /** Topmost (most recently shown) application window containing the screen point, or null. */
+    private static Stage windowAt(int x, int y) {
+        List<Window> all = Window.getWindows();
+        for (int i = all.size() - 1; i >= 0; i--) {
+            if (all.get(i) instanceof Stage s && s.isShowing() && s.getScene() != null
+                    && x >= s.getX() && x < s.getX() + s.getWidth()
+                    && y >= s.getY() && y < s.getY() + s.getHeight()) {
+                return s;
+            }
+        }
+        return null;
+    }
+
+    private void activate(Stage s) {
+        if (s == null) return;
+        activeWindow = s;
+        if (!s.isFocused()) s.requestFocus();
+        if (DEBUG) info("active window: " + s.getTitle() + " focused=" + s.isFocused());
+    }
+
     private void key(boolean down, int keysym) {
         Platform.runLater(() -> onKey(down, keysym));
     }
@@ -298,6 +323,8 @@ public final class VncServer {
         if (DEBUG) info("key " + (down ? "down" : "up") + " 0x" + Integer.toHexString(keysym));
         Node target = focusTarget();
         if (target == null) return;
+        if (DEBUG && down) info("key target: " + target.getClass().getSimpleName() + " in "
+                + (target.getScene().getWindow() instanceof Stage st ? "'" + st.getTitle() + "'" : "a popup"));
 
         KeyCode special = SPECIAL.get(keysym);
         if (special != null) {
@@ -334,16 +361,19 @@ public final class VncServer {
         Event.fireEvent(target, new KeyEvent(type, character, "", code, shift, ctrl, alt, meta));
     }
 
-    private static Node focusTarget() {
-        Window chosen = null;
+    /** Focused window, else the one last clicked, else the most recently shown one. */
+    private Node focusTarget() {
+        Window focused = null, lastShown = null;
         for (Window w : Window.getWindows()) {
             if (w.getScene() == null || !w.isShowing()) continue;
             if (w.isFocused()) {
-                chosen = w;
+                focused = w;
                 break;
             }
-            chosen = w; // fallback: last showing window
+            lastShown = w;
         }
+        boolean activeUsable = activeWindow != null && activeWindow.isShowing() && activeWindow.getScene() != null;
+        Window chosen = focused != null ? focused : activeUsable ? activeWindow : lastShown;
         if (chosen == null) return null;
         Scene s = chosen.getScene();
         Node owner = s.getFocusOwner();
