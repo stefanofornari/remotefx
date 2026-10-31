@@ -59,7 +59,7 @@ public final class VncAgent {
             }
             // (module, extraReads, extraExports, extraOpens, extraUses, extraProvides)
             inst.redefineModule(m, Set.of(), packages, packages, Set.of(), Map.of());
-            if (Boolean.getBoolean("vnc.debug")) {
+            if (Settings.bool("debug")) {
                 System.err.println("[vnc] opened " + packages.size() + " packages of " + m.getName());
             }
         }
@@ -70,7 +70,7 @@ public final class VncAgent {
      * Once it is up, we still wait for the first showing window, so capture never starts on an empty screen.
      */
     private static void startWhenToolkitIsUp() {
-        int port = Integer.getInteger("vnc.port", 5900);
+        int port = Settings.integer("port", 5900);
         while (true) {
             try {
                 CompletableFuture<Boolean> shown = new CompletableFuture<>();

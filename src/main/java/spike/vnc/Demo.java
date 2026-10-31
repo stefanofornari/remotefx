@@ -58,7 +58,7 @@ public class Demo extends Application {
         stage.show();
 
         if (!Boolean.getBoolean("demo.noserver")) { // run-agent.sh attaches the server with the Java agent instead
-            VncServer.start(Integer.getInteger("vnc.port", 5900));
+            VncServer.start(Settings.integer("port", 5900));
         }
     }
 

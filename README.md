@@ -146,11 +146,12 @@ useful only for a quick test.
 
 ## Options
 
-Agent options are `key=value` pairs separated by commas in the `-javaagent` argument. The same
-settings work as system properties (`-Dvnc.port=5900`) and, in `run.sh`, as the environment
-variables in the last column.
+Agent options are `key=value` pairs separated by commas in the `-javaagent` argument. Each
+option is looked up in this order: the agent argument or a system property (`-Dvnc.port=5900`),
+then the environment variable in the last column, then the default. So `VNC_DEBUG=true bin/yourapp`
+works without touching the `-javaagent` line.
 
-| Option    | Default     | Meaning                                                              | `run.sh` variable |
+| Option    | Default     | Meaning                                                              | Environment variable |
 |-----------|-------------|----------------------------------------------------------------------|-------------------|
 | `port`    | `5900`      | TCP port to listen on                                                | `VNC_PORT`        |
 | `bind`    | `127.0.0.1` | Address to bind. `0.0.0.0` listens on all interfaces                 | `VNC_BIND`        |

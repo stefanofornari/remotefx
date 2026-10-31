@@ -58,7 +58,7 @@ public final class VncServer {
 
     private static final int TILE = 64;
     private static final long MIN_FRAME_NANOS = 40_000_000L; // cap capture at ~25 fps
-    private static final boolean DEBUG = Boolean.getBoolean("vnc.debug");
+    private static final boolean DEBUG = Settings.bool("debug");
 
     private static final MouseButton[] BUTTONS = {MouseButton.PRIMARY, MouseButton.MIDDLE, MouseButton.SECONDARY};
     private static final Map<Integer, KeyCode> SPECIAL = new HashMap<>();
@@ -103,7 +103,7 @@ public final class VncServer {
     private Robot robot;
     private AnimationTimer timer;
     private long lastCaptureNanos;
-    private boolean useScenes = "scene".equalsIgnoreCase(System.getProperty("vnc.capture", "robot"));
+    private boolean useScenes = "scene".equalsIgnoreCase(Settings.get("capture", "robot"));
     private int blankFrames;
     private int lastMask;
     private Stage activeWindow; // window of the last button press
@@ -153,7 +153,7 @@ public final class VncServer {
         width = (int) b.getWidth();
         height = (int) b.getHeight();
 
-        InetAddress bind = InetAddress.getByName(System.getProperty("vnc.bind", "127.0.0.1"));
+        InetAddress bind = InetAddress.getByName(Settings.get("bind", "127.0.0.1"));
         serverSocket = new ServerSocket(port, 4, bind);
         if (!password.isEmpty()) {
             info("authentication: password (VNC authentication only uses the first 8 characters)");
