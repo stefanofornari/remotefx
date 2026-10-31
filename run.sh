@@ -13,4 +13,4 @@ exec java -cp "target/classes:$(cat target/cp.txt)" \
   -Dprism.text=t2k \
   -Dheadless.geometry=1280x800-32 \
   -Dvnc.port="${VNC_PORT:-5900}" \
-  spike.vnc.Demo
+  spike.vnc.Launcher
