@@ -26,6 +26,7 @@ import javax.crypto.spec.SecretKeySpec;
 
 import javafx.animation.AnimationTimer;
 import javafx.application.Platform;
+import javafx.collections.ListChangeListener;
 import javafx.event.Event;
 import javafx.event.EventType;
 import javafx.geometry.Rectangle2D;
@@ -149,6 +150,13 @@ public final class VncServer {
 
     private void doStart() throws IOException {
         robot = new Robot();
+        Window.getWindows().addListener((ListChangeListener<Window>) c -> {
+            while (c.next()) {
+                if (c.wasAdded() && c.getAddedSubList().stream().anyMatch(w -> w instanceof Stage)) {
+                    activeWindow = null; // a new window (a dialog, say) gets the keys until the next click
+                }
+            }
+        });
         Rectangle2D b = Screen.getPrimary().getBounds();
         width = (int) b.getWidth();
         height = (int) b.getHeight();
@@ -378,19 +386,19 @@ public final class VncServer {
         Event.fireEvent(target, new KeyEvent(type, character, "", code, shift, ctrl, alt, meta));
     }
 
-    /** Focused window, else the one last clicked, else the most recently shown one. */
+    /**
+     * The window last clicked, else the most recently shown focused one, else the most recently shown.
+     * Monocle can report several windows as focused at once, so "focused" alone cannot decide.
+     */
     private Node focusTarget() {
         Window focused = null, lastShown = null;
         for (Window w : Window.getWindows()) {
             if (w.getScene() == null || !w.isShowing()) continue;
-            if (w.isFocused()) {
-                focused = w;
-                break;
-            }
+            if (w.isFocused()) focused = w; // keep going: the last focused one wins
             lastShown = w;
         }
         boolean activeUsable = activeWindow != null && activeWindow.isShowing() && activeWindow.getScene() != null;
-        Window chosen = focused != null ? focused : activeUsable ? activeWindow : lastShown;
+        Window chosen = activeUsable ? activeWindow : focused != null ? focused : lastShown;
         if (chosen == null) return null;
         Scene s = chosen.getScene();
         Node owner = s.getFocusOwner();

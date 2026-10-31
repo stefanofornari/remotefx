@@ -83,7 +83,9 @@ needed. JavaFX is deliberately not bundled, since it carries per-OS natives and 
 already provides it.
 
 `headless.geometry` is the size and colour depth of the virtual screen, which is what the viewer
-shows. Make it large enough for all the windows of
+shows. Applications often centre their windows on the
+screen, so a screen that is too small pushes windows partly off its edges (a pair of 800x600
+windows on a 1280x800 screen sits at x=-160 and x=640). Make it large enough for all the windows of
 your application to fit side by side (for example `2560x1440-32`): the viewer only shows this
 screen, and a window placed outside it cannot be reached. A bigger screen costs more CPU per
 captured frame. In the viewer, use its scale-to-fit option if the screen is larger than your
