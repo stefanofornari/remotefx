@@ -6,20 +6,25 @@ import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.EOFException;
 import java.io.IOException;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketException;
+import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.zip.Deflater;
 
 import javax.crypto.Cipher;
 import javax.crypto.spec.SecretKeySpec;
@@ -59,6 +64,10 @@ public final class VncServer {
 
     private static final int TILE = 64;
     private static final long MIN_FRAME_NANOS = 40_000_000L; // cap capture at ~25 fps
+    private static final long IDLE_FRAME_NANOS = 200_000_000L; // capture rate once the screen stopped changing
+    private static final int IDLE_AFTER = 10; // identical captures in a row before slowing down
+    private static final int ENCODING_ZRLE = 16;
+    private static final VarHandle INT_LE = MethodHandles.byteArrayViewVarHandle(int[].class, ByteOrder.LITTLE_ENDIAN);
     private static final boolean DEBUG = Settings.bool("debug");
 
     private static final MouseButton[] BUTTONS = {MouseButton.PRIMARY, MouseButton.MIDDLE, MouseButton.SECONDARY};
@@ -106,6 +115,11 @@ public final class VncServer {
     private long lastCaptureNanos;
     private boolean useScenes = "scene".equalsIgnoreCase(Settings.get("capture", "robot"));
     private int blankFrames;
+    private boolean robotVerified; // robot capture produced a non-black frame at least once
+    private boolean sizeMismatchLogged;
+    private int unchangedFrames;
+    private WritableImage captureImage; // reused by the robot
+    private int[] windowBuf; // reused by captureScenes
     private int lastMask;
     private Stage activeWindow; // window of the last button press
     private WindowManager wm;     // null when the window manager is off
@@ -114,9 +128,22 @@ public final class VncServer {
     private ServerSocket serverSocket;
     private int width, height;
 
-    // guarded by frameLock; a published pixel array is never modified afterwards
-    private int[] framePixels;
+    /** A reference-counted pixel buffer: a published frame is never modified, and is recycled once unreferenced. */
+    private static final class Frame {
+        final int[] px;
+        int refs; // guarded by frameLock
+
+        Frame(int n) {
+            px = new int[n];
+        }
+    }
+
+    // guarded by frameLock (current is only ever replaced by the capture thread)
+    private final List<Frame> pool = new ArrayList<>();
+    private Frame current;
     private long frameSeq;
+
+    private final ArrayDeque<int[]> pointerQueue = new ArrayDeque<>(); // {mask, x, y}, guarded by itself
 
     private VncServer(int port) {
         this.port = port;
@@ -210,47 +237,98 @@ public final class VncServer {
     // ------------------------------------------------------------------ capture (FX thread)
 
     private void capture(long now) {
-        if (clients.isEmpty() || now - lastCaptureNanos < MIN_FRAME_NANOS) return;
+        if (!anyClientWaiting()) return;
+        long interval = unchangedFrames >= IDLE_AFTER ? IDLE_FRAME_NANOS : MIN_FRAME_NANOS;
+        if (now - lastCaptureNanos < interval) return;
         lastCaptureNanos = now;
 
-        int[] px = useScenes ? captureScenes() : captureRobot();
-        if (px == null) return;
-        if (!useScenes && isBlank(px) && hasShowingWindow()) {
-            if (++blankFrames >= 5) {
-                info("robot capture is all black; switching to per-window scene snapshots (same as -Dvnc.capture=scene)");
-                useScenes = true;
-            }
+        Frame f = acquireFrame();
+        if (!(useScenes ? captureScenes(f.px) : captureRobot(f.px))) {
+            release(f);
             return;
         }
+        if (!useScenes && !robotVerified) {
+            if (!isBlank(f.px)) {
+                robotVerified = true;
+            } else if (hasShowingWindow()) {
+                if (++blankFrames >= 5) {
+                    info("robot capture is all black; switching to per-window scene snapshots (same as -Dvnc.capture=scene)");
+                    useScenes = true;
+                }
+                release(f);
+                return;
+            }
+        }
+        if (current != null && Arrays.equals(current.px, f.px)) {
+            unchangedFrames++;
+            release(f);
+            return;
+        }
+        unchangedFrames = 0;
         if (DEBUG && frameSeq == 0) info("first frame captured (" + (useScenes ? "scene" : "robot") + ")");
         synchronized (frameLock) {
-            framePixels = px;
+            Frame old = current;
+            current = f; // keeps the reference taken by acquireFrame
             frameSeq++;
+            if (old != null) old.refs--;
             frameLock.notifyAll();
         }
     }
 
-    /** Whole-screen grab through the platform robot; null if unusable. */
-    private int[] captureRobot() {
-        try {
-            WritableImage img = robot.getScreenCapture(null, 0, 0, width, height);
-            if ((int) img.getWidth() != width || (int) img.getHeight() != height) {
-                info("capture is " + img.getWidth() + "x" + img.getHeight() + ", expected " + width + "x" + height + " (HiDPI scaling?)");
-                return null;
+    /** Capture is pointless unless some client has an update request outstanding. */
+    private boolean anyClientWaiting() {
+        for (Client c : clients) {
+            if (c.pending) return true;
+        }
+        return false;
+    }
+
+    private Frame acquireFrame() {
+        synchronized (frameLock) {
+            for (Frame f : pool) {
+                if (f.refs == 0) {
+                    f.refs = 1;
+                    return f;
+                }
             }
-            int[] px = new int[width * height];
-            img.getPixelReader().getPixels(0, 0, width, height, WritablePixelFormat.getIntArgbInstance(), px, 0, width);
-            return px;
+            Frame f = new Frame(width * height);
+            f.refs = 1;
+            pool.add(f);
+            return f;
+        }
+    }
+
+    private void release(Frame f) {
+        if (f == null) return;
+        synchronized (frameLock) {
+            f.refs--;
+        }
+    }
+
+    /** Whole-screen grab through the platform robot into dst; false if unusable. */
+    private boolean captureRobot(int[] dst) {
+        try {
+            WritableImage img = robot.getScreenCapture(captureImage, 0, 0, width, height);
+            if ((int) img.getWidth() != width || (int) img.getHeight() != height) {
+                if (!sizeMismatchLogged) {
+                    sizeMismatchLogged = true;
+                    info("capture is " + img.getWidth() + "x" + img.getHeight() + ", expected " + width + "x" + height + " (HiDPI scaling?)");
+                }
+                return false;
+            }
+            captureImage = img;
+            img.getPixelReader().getPixels(0, 0, width, height, WritablePixelFormat.getIntArgbInstance(), dst, 0, width);
+            return true;
         } catch (RuntimeException e) {
             info("robot capture failed (" + e + "); switching to per-window scene snapshots");
             useScenes = true;
-            return null;
+            return false;
         }
     }
 
     /** Fallback: snapshot every showing window (popups included) and paint it at its screen position. */
-    private int[] captureScenes() {
-        int[] px = new int[width * height];
+    private boolean captureScenes(int[] px) {
+        Arrays.fill(px, 0);
         for (Window w : Window.getWindows()) {
             Scene s = w.getScene();
             if (s == null || !w.isShowing()) continue;
@@ -259,20 +337,19 @@ public final class VncServer {
             if (ox >= width || oy >= height || ox + w.getWidth() <= 0 || oy + w.getHeight() <= 0) continue; // off-screen
             WritableImage snap = s.snapshot(null);
             int sw = (int) snap.getWidth(), sh = (int) snap.getHeight();
-            int[] sp = new int[sw * sh];
+            if (windowBuf == null || windowBuf.length < sw * sh) windowBuf = new int[sw * sh];
+            int[] sp = windowBuf;
             snap.getPixelReader().getPixels(0, 0, sw, sh, WritablePixelFormat.getIntArgbInstance(), sp, 0, sw);
-            for (int y = 0; y < sh; y++) {
-                int dy = oy + y;
-                if (dy < 0 || dy >= height) continue;
-                for (int x = 0; x < sw; x++) {
-                    int dx = ox + x;
-                    if (dx < 0 || dx >= width) continue;
-                    int p = sp[y * sw + x];
-                    if ((p >>> 24) != 0) px[dy * width + dx] = p;
+            int x0 = Math.max(0, -ox), x1 = Math.min(sw, width - ox);
+            for (int y = Math.max(0, -oy); y < sh && oy + y < height; y++) {
+                int src = y * sw, dst = (oy + y) * width + ox;
+                for (int x = x0; x < x1; x++) {
+                    int p = sp[src + x];
+                    if ((p >>> 24) != 0) px[dst + x] = p;
                 }
             }
         }
-        return px;
+        return true;
     }
 
     private static boolean isBlank(int[] px) {
@@ -291,24 +368,48 @@ public final class VncServer {
 
     // ------------------------------------------------------------------ input (marshalled to the FX thread)
 
+    /** Consecutive events with the same button mask are just motion: only the last one matters. */
     private void pointer(int mask, int x, int y) {
-        Platform.runLater(() -> {
-            if (DEBUG) info("pointer " + x + "," + y + " mask=" + mask);
-            robot.mouseMove(x, y);
-            // With no window manager nothing ever takes focus: make the clicked window the active one
-            // (before the press, so the click lands in an already focused window) and send keys to it.
-            if ((mask & 7 & ~lastMask) != 0) activate(windowAt(x, y));
-            for (int bit = 0; bit < 3; bit++) {
-                boolean now = ((mask >> bit) & 1) != 0;
-                boolean was = ((lastMask >> bit) & 1) != 0;
-                if (now && !was) robot.mousePress(BUTTONS[bit]);
-                if (!now && was) robot.mouseRelease(BUTTONS[bit]);
+        boolean schedule;
+        synchronized (pointerQueue) {
+            int[] last = pointerQueue.peekLast();
+            schedule = last == null;
+            if (last != null && last[0] == mask) {
+                last[1] = x;
+                last[2] = y;
+            } else {
+                pointerQueue.add(new int[]{mask, x, y});
             }
-            // RFB buttons 4/5 are the wheel: bit 3 = up, bit 4 = down (one notch per press)
-            if ((mask & 8) != 0 && (lastMask & 8) == 0) robot.mouseWheel(-1);
-            if ((mask & 16) != 0 && (lastMask & 16) == 0) robot.mouseWheel(1);
-            lastMask = mask;
-        });
+        }
+        if (schedule) Platform.runLater(this::drainPointer);
+    }
+
+    private void drainPointer() {
+        List<int[]> batch;
+        synchronized (pointerQueue) {
+            batch = new ArrayList<>(pointerQueue);
+            pointerQueue.clear();
+        }
+        for (int[] e : batch) onPointer(e[0], e[1], e[2]);
+    }
+
+    private void onPointer(int mask, int x, int y) {
+        unchangedFrames = 0;
+        if (DEBUG) info("pointer " + x + "," + y + " mask=" + mask);
+        robot.mouseMove(x, y);
+        // With no window manager nothing ever takes focus: make the clicked window the active one
+        // (before the press, so the click lands in an already focused window) and send keys to it.
+        if ((mask & 7 & ~lastMask) != 0) activate(windowAt(x, y));
+        for (int bit = 0; bit < 3; bit++) {
+            boolean now = ((mask >> bit) & 1) != 0;
+            boolean was = ((lastMask >> bit) & 1) != 0;
+            if (now && !was) robot.mousePress(BUTTONS[bit]);
+            if (!now && was) robot.mouseRelease(BUTTONS[bit]);
+        }
+        // RFB buttons 4/5 are the wheel: bit 3 = up, bit 4 = down (one notch per press)
+        if ((mask & 8) != 0 && (lastMask & 8) == 0) robot.mouseWheel(-1);
+        if ((mask & 16) != 0 && (lastMask & 16) == 0) robot.mouseWheel(1);
+        lastMask = mask;
     }
 
     /** Topmost (most recently shown) application window containing the screen point, or null. */
@@ -354,6 +455,7 @@ public final class VncServer {
     }
 
     private void onKey(boolean down, int keysym) {
+        unchangedFrames = 0;
         if (DEBUG) info("key " + (down ? "down" : "up") + " 0x" + Integer.toHexString(keysym));
         Node target = focusTarget();
         if (target == null) return;
@@ -488,14 +590,9 @@ public final class VncServer {
             return trueColour && (bpp == 8 || bpp == 16 || bpp == 32);
         }
 
-        /** Generic (slow) conversion from 0xAARRGGBB. */
-        void encode(int argb, byte[] dst, int off) {
-            int r = (argb >> 16) & 0xff, g = (argb >> 8) & 0xff, b = argb & 0xff;
-            int v = ((r * rMax / 255) << rShift) | ((g * gMax / 255) << gShift) | ((b * bMax / 255) << bShift);
-            int n = bpp / 8;
-            for (int i = 0; i < n; i++) {
-                dst[off + i] = (byte) (big ? v >>> (8 * (n - 1 - i)) : v >>> (8 * i));
-            }
+        /** ZRLE sends 3-byte CPIXELs when a 32 bpp format only uses 24 bits (spec: depth <= 24, bits in the low bytes). */
+        boolean compactCpixel() {
+            return bpp == 32 && rMax == 255 && gMax == 255 && bMax == 255 && rShift <= 16 && gShift <= 16 && bShift <= 16;
         }
     }
 
@@ -506,13 +603,25 @@ public final class VncServer {
         private DataInputStream in;
         private DataOutputStream out;
         private volatile PixelFmt pf = PixelFmt.DEFAULT;
+        private volatile boolean zrle;
+        private volatile boolean pending; // written under frameLock
 
         // guarded by frameLock
-        private boolean pending, forceFull, closed;
+        private boolean forceFull, closed;
 
         // sender thread only
-        private int[] prev;
+        private Frame prev;
         private long lastSeq;
+        private byte[] row = new byte[0];
+        private PixelFmt lutFmt;
+        private int[] rt, gt, bt; // per-channel lookup tables for the current pixel format
+        private Deflater deflater;
+        private byte[] zin = new byte[0], zout = new byte[0];
+        private int zinLen, zoutLen;
+        private final int[] tile = new int[TILE * TILE];
+        private final byte[] tileIdx = new byte[TILE * TILE];
+        private final int[] palette = new int[16];
+        private final int[] one = new int[1];
 
         Client(Socket socket) {
             this.socket = socket;
@@ -627,10 +736,14 @@ public final class VncServer {
                         if (p.supported()) pf = p;
                         else info("unsupported pixel format requested: " + p);
                     }
-                    case 2 -> { // SetEncodings (we only ever send Raw)
+                    case 2 -> { // SetEncodings: we speak ZRLE and Raw
                         in.skipNBytes(1);
                         int n = in.readUnsignedShort();
-                        in.skipNBytes(4L * n);
+                        boolean z = false;
+                        for (int i = 0; i < n; i++) {
+                            if (in.readInt() == ENCODING_ZRLE) z = true;
+                        }
+                        zrle = z;
                     }
                     case 3 -> { // FramebufferUpdateRequest
                         boolean incremental = in.readUnsignedByte() != 0;
@@ -664,45 +777,52 @@ public final class VncServer {
         private void sendLoop() {
             try {
                 while (true) {
-                    int[] cur;
+                    Frame cur;
                     long seq;
                     boolean full;
                     synchronized (frameLock) {
-                        while (!closed && !(pending && framePixels != null && (forceFull || frameSeq != lastSeq))) {
+                        while (!closed && !(pending && current != null && (forceFull || frameSeq != lastSeq))) {
                             frameLock.wait(1000);
                         }
                         if (closed) return;
-                        cur = framePixels;
+                        cur = current;
+                        cur.refs++;
                         seq = frameSeq;
                         full = forceFull;
                         forceFull = false;
                     }
                     List<int[]> rects = (full || prev == null)
                             ? List.of(new int[]{0, 0, width, height})
-                            : diff(prev, cur);
+                            : diff(prev.px, cur.px);
                     lastSeq = seq;
-                    if (rects.isEmpty()) continue; // nothing changed: keep the request pending
+                    if (rects.isEmpty()) { // nothing changed: keep the request pending
+                        release(cur);
+                        continue;
+                    }
                     synchronized (frameLock) {
                         pending = false;
                     }
-                    writeUpdate(cur, rects, pf);
+                    Frame old = prev;
                     prev = cur;
+                    release(old);
+                    writeUpdate(cur.px, rects, pf);
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             } catch (IOException e) {
                 if (DEBUG) info("send failed: " + e);
             } finally {
+                release(prev);
+                prev = null;
+                if (deflater != null) deflater.end();
                 closeQuietly();
             }
         }
 
         private void writeUpdate(int[] px, List<int[]> rects, PixelFmt f) throws IOException {
-            boolean fast = f.equals(PixelFmt.DEFAULT);
-            if (DEBUG) info("sending update: " + rects.size() + " rect(s), format " + f);
-            int bytesPP = f.bpp() / 8;
-            byte[] row = new byte[width * 4];
-
+            prepare(f);
+            boolean z = zrle;
+            if (DEBUG) info("sending update: " + rects.size() + " rect(s), format " + f + (z ? ", ZRLE" : ", Raw"));
             out.writeByte(0); // FramebufferUpdate
             out.writeByte(0);
             out.writeShort(rects.size());
@@ -711,26 +831,152 @@ public final class VncServer {
                 out.writeShort(r[1]);
                 out.writeShort(r[2]);
                 out.writeShort(r[3]);
-                out.writeInt(0); // Raw
-                for (int y = r[1]; y < r[1] + r[3]; y++) {
-                    int o = 0;
-                    for (int x = r[0]; x < r[0] + r[2]; x++) {
-                        int p = px[y * width + x];
-                        if (fast) {
-                            row[o] = (byte) p;
-                            row[o + 1] = (byte) (p >> 8);
-                            row[o + 2] = (byte) (p >> 16);
-                            row[o + 3] = (byte) 0xff; // unused byte; opaque in case a viewer treats it as alpha
-                            o += 4;
-                        } else {
-                            f.encode(p, row, o);
-                            o += bytesPP;
-                        }
-                    }
-                    out.write(row, 0, o);
-                }
+                out.writeInt(z ? ENCODING_ZRLE : 0);
+                if (z) writeZrle(px, r, f);
+                else writeRaw(px, r, f);
             }
             out.flush();
+        }
+
+        private void prepare(PixelFmt f) {
+            if (f.equals(lutFmt)) return;
+            lutFmt = f;
+            if (f.equals(PixelFmt.DEFAULT)) return;
+            rt = channelTable(f.rMax(), f.rShift());
+            gt = channelTable(f.gMax(), f.gShift());
+            bt = channelTable(f.bMax(), f.bShift());
+        }
+
+        private int[] channelTable(int max, int shift) {
+            int[] t = new int[256];
+            for (int c = 0; c < 256; c++) t[c] = (c * max / 255) << shift;
+            return t;
+        }
+
+        private void writeRaw(int[] px, int[] r, PixelFmt f) throws IOException {
+            int rowBytes = r[2] * (f.bpp() / 8);
+            if (row.length < rowBytes) row = new byte[rowBytes];
+            for (int y = r[1]; y < r[1] + r[3]; y++) {
+                encodeRun(px, y * width + r[0], r[2], row, 0, f, false);
+                out.write(row, 0, rowBytes);
+            }
+        }
+
+        /** Converts n 0xAARRGGBB pixels to the client's format; returns the new offset in dst. */
+        private int encodeRun(int[] px, int off, int n, byte[] dst, int o, PixelFmt f, boolean compact) {
+            if (f.equals(PixelFmt.DEFAULT)) {
+                if (compact) {
+                    for (int i = off; i < off + n; i++) {
+                        int p = px[i];
+                        dst[o] = (byte) p;
+                        dst[o + 1] = (byte) (p >> 8);
+                        dst[o + 2] = (byte) (p >> 16);
+                        o += 3;
+                    }
+                } else {
+                    for (int i = off; i < off + n; i++) {
+                        INT_LE.set(dst, o, px[i] | 0xff000000); // unused byte; opaque in case a viewer treats it as alpha
+                        o += 4;
+                    }
+                }
+                return o;
+            }
+            int bytes = compact ? 3 : f.bpp() / 8;
+            boolean big = f.big();
+            for (int i = off; i < off + n; i++) {
+                int p = px[i];
+                int v = rt[(p >> 16) & 0xff] | gt[(p >> 8) & 0xff] | bt[p & 0xff];
+                if (big) {
+                    for (int k = bytes - 1; k >= 0; k--) dst[o++] = (byte) (v >>> (8 * k));
+                } else {
+                    for (int k = 0; k < bytes; k++) dst[o++] = (byte) (v >>> (8 * k));
+                }
+            }
+            return o;
+        }
+
+        // ---- ZRLE: 64x64 tiles (solid, packed palette or raw), one zlib stream for the whole connection
+
+        private void writeZrle(int[] px, int[] r, PixelFmt f) throws IOException {
+            boolean compact = f.compactCpixel();
+            int cp = compact ? 3 : f.bpp() / 8;
+            zinLen = 0;
+            for (int ty = r[1]; ty < r[1] + r[3]; ty += TILE) {
+                int th = Math.min(TILE, r[1] + r[3] - ty);
+                for (int tx = r[0]; tx < r[0] + r[2]; tx += TILE) {
+                    encodeTile(px, tx, ty, Math.min(TILE, r[0] + r[2] - tx), th, f, compact, cp);
+                }
+            }
+            if (deflater == null) deflater = new Deflater(3);
+            deflater.setInput(zin, 0, zinLen);
+            zoutLen = 0;
+            while (true) {
+                if (zoutLen == zout.length) zout = Arrays.copyOf(zout, Math.max(1 << 16, zout.length * 2));
+                zoutLen += deflater.deflate(zout, zoutLen, zout.length - zoutLen, Deflater.SYNC_FLUSH);
+                if (zoutLen < zout.length) break;
+            }
+            out.writeInt(zoutLen);
+            out.write(zout, 0, zoutLen);
+        }
+
+        private void zinEnsure(int extra) {
+            if (zinLen + extra > zin.length) zin = Arrays.copyOf(zin, Math.max(zinLen + extra, zin.length * 2));
+        }
+
+        private void putCpixel(int argb, PixelFmt f, boolean compact, int cp) {
+            zinEnsure(cp);
+            one[0] = argb;
+            zinLen = encodeRun(one, 0, 1, zin, zinLen, f, compact);
+        }
+
+        private void encodeTile(int[] px, int tx, int ty, int tw, int th, PixelFmt f, boolean compact, int cp) {
+            int n = tw * th;
+            for (int y = 0; y < th; y++) {
+                System.arraycopy(px, (ty + y) * width + tx, tile, y * tw, tw);
+            }
+            int colours = 0;
+            boolean paletteOk = true;
+            for (int i = 0; i < n && paletteOk; i++) {
+                int c = tile[i] & 0xffffff;
+                int k = 0;
+                while (k < colours && (palette[k] & 0xffffff) != c) k++;
+                if (k == colours) {
+                    if (colours == palette.length) {
+                        paletteOk = false;
+                        break;
+                    }
+                    palette[colours++] = tile[i];
+                }
+                tileIdx[i] = (byte) k;
+            }
+            if (paletteOk && colours == 1) {
+                zinEnsure(1 + cp);
+                zin[zinLen++] = 1;
+                putCpixel(palette[0], f, compact, cp);
+            } else if (paletteOk) {
+                int bits = colours == 2 ? 1 : colours <= 4 ? 2 : 4;
+                int rowBytes = (tw * bits + 7) / 8;
+                zinEnsure(1 + colours * cp + rowBytes * th);
+                zin[zinLen++] = (byte) colours;
+                for (int k = 0; k < colours; k++) putCpixel(palette[k], f, compact, cp);
+                for (int y = 0; y < th; y++) {
+                    int acc = 0, used = 0;
+                    for (int x = 0; x < tw; x++) {
+                        acc = (acc << bits) | tileIdx[y * tw + x];
+                        used += bits;
+                        if (used == 8) {
+                            zin[zinLen++] = (byte) acc;
+                            acc = 0;
+                            used = 0;
+                        }
+                    }
+                    if (used > 0) zin[zinLen++] = (byte) (acc << (8 - used));
+                }
+            } else {
+                zinEnsure(1 + n * cp);
+                zin[zinLen++] = 0;
+                zinLen = encodeRun(tile, 0, n, zin, zinLen, f, compact);
+            }
         }
     }
 
