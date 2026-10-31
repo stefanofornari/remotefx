@@ -100,7 +100,7 @@ final class WindowManager {
      */
     boolean handleShortcut(int keysym) {
         int target = shortcutTarget(keysym, shiftedDigits);
-        if (target == CYCLE) return cycle();
+        if (target == CYCLE) return cycleBy(1);
         return target >= 0 && switchTo(target);
     }
 
@@ -123,10 +123,15 @@ final class WindowManager {
         return true;
     }
 
-    private boolean cycle() {
-        if (topLevels.size() < 2) return false;
-        int i = topLevels.indexOf(visible);
-        show(topLevels.get((i + 1) % topLevels.size()));
+    /** More than one top-level window, so there is something to cycle through. */
+    boolean canCycle() {
+        return topLevels.size() >= 2;
+    }
+
+    /** Shows the next (step 1) or the previous (step -1) top-level window, wrapping around. */
+    boolean cycleBy(int step) {
+        if (!canCycle()) return false;
+        show(topLevels.get(Math.floorMod(topLevels.indexOf(visible) + step, topLevels.size())));
         return true;
     }
 

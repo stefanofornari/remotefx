@@ -161,6 +161,10 @@ Monocle has no window manager, so remotefx brings a very small one, built for a 
   windows is not passed on to the application. Ctrl+Shift+Tab is also "previous tab" in a JavaFX
   `TabPane`: while two or more top-level windows exist the window manager takes it, with a single
   window it goes to the application as usual.
+  **Ctrl+mouse wheel** also switches window: scroll down for the next one, up for the previous one,
+  at most four switches a second because a trackpad swipe sends many notches. Ctrl+wheel is
+  normally "zoom" in an application, so the same rule applies: it is taken only while two or more
+  top-level windows exist.
   The viewer sends the character a key produces, not the key itself, so with Shift held the digit row
   arrives as `!@#$%^&*(` on a US layout. That is the default; for another layout set `digits` (or
   `VNC_DIGITS`) to the ten characters Shift+0 ... Shift+9 produce, for example Italian: `=!"£$%&/()`.

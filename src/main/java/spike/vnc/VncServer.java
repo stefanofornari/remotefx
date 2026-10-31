@@ -123,6 +123,9 @@ public final class VncServer {
     private WritableImage captureImage; // reused by the robot
     private int[] windowBuf; // reused by captureScenes
     private int lastMask;
+    private long lastWheelCycle;
+    private boolean wheelCycled; // nanoTime has an arbitrary origin: do not compare against an unset 0
+    private static final long WHEEL_CYCLE_GAP_NANOS = 250_000_000L;
     private Stage activeWindow; // window of the last button press
     private WindowManager wm;     // null when the window manager is off
     private final Set<Integer> swallowed = new HashSet<>(); // keys whose press was a window shortcut
@@ -410,8 +413,21 @@ public final class VncServer {
             if (!now && was) robot.mouseRelease(BUTTONS[bit]);
         }
         // RFB buttons 4/5 are the wheel: bit 3 = up, bit 4 = down (one notch per press)
-        if ((mask & 8) != 0 && (lastMask & 8) == 0) robot.mouseWheel(-1);
-        if ((mask & 16) != 0 && (lastMask & 16) == 0) robot.mouseWheel(1);
+        boolean wheelUp = (mask & 8) != 0 && (lastMask & 8) == 0;
+        boolean wheelDown = (mask & 16) != 0 && (lastMask & 16) == 0;
+        if ((wheelUp || wheelDown) && ctrl && wm != null && wm.canCycle()) {
+            // Ctrl+wheel switches window (down = next, up = previous). A trackpad sends a burst of notches
+            // per swipe, so switch at most once per gap and swallow the rest.
+            long now = System.nanoTime();
+            if (!wheelCycled || now - lastWheelCycle >= WHEEL_CYCLE_GAP_NANOS) {
+                wheelCycled = true;
+                lastWheelCycle = now;
+                wm.cycleBy(wheelDown ? 1 : -1);
+            }
+        } else {
+            if (wheelUp) robot.mouseWheel(-1);
+            if (wheelDown) robot.mouseWheel(1);
+        }
         lastMask = mask;
     }
 
